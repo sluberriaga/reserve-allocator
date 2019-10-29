@@ -1,7 +1,6 @@
 package main
 
 import (
-	"account/account"
 	"fmt"
 	"github.com/gin-contrib/static"
 	_ "github.com/gin-contrib/static"
@@ -9,8 +8,50 @@ import (
 	"github.com/gin-gonic/gin/binding"
 	"gopkg.in/go-playground/validator.v9"
 	"log"
+	"reserve/reserve"
+	"reserve/reserve/allocator"
+	"reserve/reserve/concurrency"
 	"time"
 )
+
+func main() {
+	router := buildRouter()
+	err := router.Run(":8080")
+	if err != nil {
+		log.Panic(err)
+	}
+}
+
+func buildRouter() *gin.Engine {
+	if v, ok := binding.Validator.Engine().(*validator.Validate); ok {
+		v.RegisterStructValidation(reserve.BodyStructValidation, reserve.Body{})
+	}
+
+	config := reserve.NewConfig()
+
+	concurrencyService := concurrency.NewService(config.Concurrency)
+	allocatorService := allocator.NewService(config.Allocator)
+
+	reserveService := reserve.NewService(
+		concurrencyService.CheckConcurrency,
+		allocatorService.AllocateReserve,
+		allocatorService.ListFromDB,
+		allocatorService.ListFromRegistry,
+	)
+
+	router := gin.New()
+	router.Use(loggerMiddleware)
+	router.Use(concurrencyService.RegisterEntryMiddleware)
+	router.Use(allocatorService.RegisterBucketExpirationMiddleware)
+	router.Use(gin.Recovery())
+
+	router.Use(static.Serve("/", static.LocalFile("./static", true)))
+	router.POST("/api/users/:user_id/reserve", reserveService.HandleCreation)
+	router.GET("/db/:user_id", reserveService.HandleDBRequest)
+	router.GET("/registry/:user_id", reserveService.HandleRegistryRequest)
+
+	return router
+}
 
 var loggerMiddleware = gin.LoggerWithFormatter(func(param gin.LogFormatterParams) string {
 	return fmt.Sprintf("%s - [%s] \"%s %s %s %d %s \"%s\" %s\"\n",
@@ -25,31 +66,3 @@ var loggerMiddleware = gin.LoggerWithFormatter(func(param gin.LogFormatterParams
 		param.ErrorMessage,
 	)
 })
-
-func main() {
-	if v, ok := binding.Validator.Engine().(*validator.Validate); ok {
-		v.RegisterStructValidation(account.TransactionBodyValidation, account.TransactionBody{})
-	}
-
-	router := gin.New()
-	router.Use(loggerMiddleware)
-	router.Use(gin.Recovery())
-
-	mainAccount := account.New()
-	accountService := account.NewService(mainAccount)
-
-	router.Use(static.Serve("/", static.LocalFile("./static", true)))
-
-	apiRouter := router.Group("/api")
-	{
-		apiRouter.POST("/account/transaction", accountService.PostTransactionHandler)
-		apiRouter.GET("/account/balance", accountService.GetBalance)
-		apiRouter.GET("/account/transaction", accountService.GetTransactions)
-		apiRouter.GET("/account/transaction/*id", accountService.GetTransactionByID)
-	}
-
-	err := router.Run(":8080")
-	if err != nil {
-		log.Panic(err)
-	}
-}
